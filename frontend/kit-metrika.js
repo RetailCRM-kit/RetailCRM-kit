@@ -18,6 +18,7 @@
     allowNetworkStartWithoutUserGesture: false,
     userGestureWindowMs: 15000,
     domChatDetection: true,
+    domNightFormSubmitDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
     websocketDetection: false,
@@ -914,6 +915,23 @@
     } catch {}
   };
 
+  const installDomNightFormSubmitDetector = () => {
+    if (!config.domNightFormSubmitDetection) return;
+    document.addEventListener(
+      "submit",
+      (e) => {
+        try {
+          const t = e && e.target;
+          if (!t || t.nodeType !== Node.ELEMENT_NODE) return;
+          const root = findChatRoot(t);
+          if (!root) return;
+          fireNightForm({ source: "dom", via: "formSubmit" });
+        } catch {}
+      },
+      true,
+    );
+  };
+
   const init = () => {
     captureAttributionFromUrl();
     installFetchHook();
@@ -922,6 +940,7 @@
     installPostMessageHook();
     installDomTextObserver();
     installDomChatStartDetector();
+    installDomNightFormSubmitDetector();
 
     window.kitMetrika = {
       fireStartChat,
