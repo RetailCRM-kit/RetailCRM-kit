@@ -10,6 +10,10 @@
     emitToDomEvent: true,
     startChatEventName: "kit_start_chat_retail",
     nightFormEventName: "kit_night_form_chat_retail",
+    startChatWebhookUrl: "",
+    nightFormWebhookUrl: "",
+    webhookUseBeacon: true,
+    webhookTimeoutMs: 3500,
     domChatDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
@@ -59,6 +63,10 @@
         nightStartHourMsk: parseNumber(p.get("nightStartHourMsk")) ?? parseNumber(p.get("nightStart")),
         nightEndHourMsk: parseNumber(p.get("nightEndHourMsk")) ?? parseNumber(p.get("nightEnd")),
         debug: parseBoolean(p.get("debug")),
+        startChatWebhookUrl: p.get("startWebhook") ?? p.get("startChatWebhookUrl"),
+        nightFormWebhookUrl: p.get("nightWebhook") ?? p.get("nightFormWebhookUrl"),
+        webhookUseBeacon: parseBoolean(p.get("webhookUseBeacon")),
+        webhookTimeoutMs: parseNumber(p.get("webhookTimeoutMs")),
         startChatDedupeScope: p.get("startChatDedupeScope"),
         nightFormDedupeScope: p.get("nightFormDedupeScope"),
         dedupeTtlMs: parseNumber(p.get("dedupeTtlMs")),
@@ -87,6 +95,75 @@
     try {
       console.log("[kit-metrika]", ...args);
     } catch {}
+  };
+
+  const getOrCreateVisitorId = () => {
+    const key = "kit_metrika_visitor_id";
+    try {
+      const existing = localStorage.getItem(key);
+      if (existing) return String(existing);
+    } catch {}
+
+    try {
+      const bytes = new Uint8Array(16);
+      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      try {
+        localStorage.setItem(key, hex);
+      } catch {}
+      return hex;
+    } catch {
+      return String(Date.now());
+    }
+  };
+
+  const postWebhook = (url, payload) => {
+    if (!url) return { status: "skipped" };
+    const u = String(url);
+    let body = "";
+    try {
+      body = JSON.stringify(payload && typeof payload === "object" ? payload : { payload });
+    } catch {
+      body = "{}";
+    }
+
+    try {
+      if (config.webhookUseBeacon && navigator && typeof navigator.sendBeacon === "function") {
+        const ok = navigator.sendBeacon(u, new Blob([body], { type: "application/json" }));
+        return { status: ok ? "sent" : "error" };
+      }
+    } catch {}
+
+    if (typeof window.fetch !== "function") return { status: "error" };
+
+    try {
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      const timeoutMs = Number(config.webhookTimeoutMs);
+      const timeout =
+        controller && Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? window.setTimeout(() => controller.abort(), timeoutMs)
+          : null;
+
+      void window
+        .fetch(u, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+          mode: "no-cors",
+          credentials: "omit",
+          keepalive: true,
+          signal: controller ? controller.signal : undefined,
+        })
+        .catch((e) => log("webhook ошибка:", e))
+        .finally(() => timeout && window.clearTimeout(timeout));
+
+      return { status: "sent" };
+    } catch (e) {
+      log("webhook ошибка:", e);
+      return { status: "error", error: e };
+    }
   };
 
   const pendingYmQueue = [];
@@ -281,7 +358,7 @@
     const dedupeKey = buildDedupeKey(goalName, scope);
     if (inMemoryFired.has(dedupeKey) || isGoalAlreadyFired(goalName, scope)) {
       log("пропуск (дедуп):", goalName, scope);
-      return;
+      return false;
     }
     inMemoryFired.add(dedupeKey);
 
@@ -291,7 +368,7 @@
     if (result.status === "sent") {
       markGoalFired(goalName, scope, meta);
       log("зафиксировано:", goalName, scope, { ym: "sent", signal: emitted, meta: meta ?? null });
-      return;
+      return true;
     }
 
     if (result.status === "queued") {
@@ -302,26 +379,64 @@
       });
       scheduleYmFlush();
       log("в очереди (ym еще грузится):", goalName, scope, { signal: emitted, meta: meta ?? null });
-      return;
+      return true;
     }
 
     if (emitted) {
       log("сигнал отправлен без ym:", goalName, scope, meta ?? null);
-      return;
+      return true;
     }
 
     log("цель не отправлена:", goalName, scope, meta ?? null);
+    return true;
   };
 
-  const fireStartChat = (meta) =>
-    fireGoalOnce(config.startChatGoal, config.startChatDedupeScope, meta, config.startChatEventName);
+  const fireStartChat = (meta) => {
+    const fired = fireGoalOnce(
+      config.startChatGoal,
+      config.startChatDedupeScope,
+      meta,
+      config.startChatEventName,
+    );
+    if (!fired) return;
+    const payload = {
+      event: "start_chat",
+      goalName: String(config.startChatGoal),
+      counterId: Number(config.counterId),
+      visitorId: getOrCreateVisitorId(),
+      pageUrl: String(location.href),
+      referrer: String(document.referrer || ""),
+      ts: new Date().toISOString(),
+      meta: meta && typeof meta === "object" ? meta : undefined,
+    };
+    const r = postWebhook(config.startChatWebhookUrl, payload);
+    if (config.debug) log("webhook start_chat:", r.status);
+  };
 
   const fireNightForm = (meta) => {
     if (!isNightMsk()) {
       log("не ночь по МСК, пропуск Night_form_chat_Retail");
       return;
     }
-    fireGoalOnce(config.nightFormGoal, config.nightFormDedupeScope, meta, config.nightFormEventName);
+    const fired = fireGoalOnce(
+      config.nightFormGoal,
+      config.nightFormDedupeScope,
+      meta,
+      config.nightFormEventName,
+    );
+    if (!fired) return;
+    const payload = {
+      event: "night_form",
+      goalName: String(config.nightFormGoal),
+      counterId: Number(config.counterId),
+      visitorId: getOrCreateVisitorId(),
+      pageUrl: String(location.href),
+      referrer: String(document.referrer || ""),
+      ts: new Date().toISOString(),
+      meta: meta && typeof meta === "object" ? meta : undefined,
+    };
+    const r = postWebhook(config.nightFormWebhookUrl, payload);
+    if (config.debug) log("webhook night_form:", r.status);
   };
 
   const looksLikeChatSend = (url, bodyText) => {
