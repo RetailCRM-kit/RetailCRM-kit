@@ -15,6 +15,8 @@
     webhookUseBeacon: true,
     webhookTimeoutMs: 3500,
     attributionTtlMs: 1000 * 60 * 60 * 24 * 30,
+    allowNetworkStartWithoutUserGesture: false,
+    userGestureWindowMs: 15000,
     domChatDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
@@ -69,6 +71,8 @@
         webhookUseBeacon: parseBoolean(p.get("webhookUseBeacon")),
         webhookTimeoutMs: parseNumber(p.get("webhookTimeoutMs")),
         attributionTtlMs: parseNumber(p.get("attributionTtlMs")),
+        allowNetworkStartWithoutUserGesture: parseBoolean(p.get("allowNetworkStartWithoutUserGesture")),
+        userGestureWindowMs: parseNumber(p.get("userGestureWindowMs")),
         startChatDedupeScope: p.get("startChatDedupeScope"),
         nightFormDedupeScope: p.get("nightFormDedupeScope"),
         dedupeTtlMs: parseNumber(p.get("dedupeTtlMs")),
@@ -176,6 +180,19 @@
     const out = { ...a };
     delete out.ts;
     return out;
+  };
+
+  const userGesture = { sendAttemptTs: 0 };
+
+  const markUserSendAttempt = () => {
+    userGesture.sendAttemptTs = Date.now();
+  };
+
+  const isRecentUserSendAttempt = () => {
+    if (config.allowNetworkStartWithoutUserGesture) return true;
+    const win = Number(config.userGestureWindowMs);
+    const windowMs = Number.isFinite(win) && win > 0 ? win : DEFAULTS.userGestureWindowMs;
+    return Date.now() - Number(userGesture.sendAttemptTs || 0) <= windowMs;
   };
 
   const postWebhook = (url, payload) => {
@@ -504,6 +521,15 @@
   };
 
   const extractMessageText = (raw) => {
+    if (raw && typeof FormData !== "undefined" && raw instanceof FormData) {
+      const candidates = ["text", "message", "content", "body"];
+      for (const k of candidates) {
+        const v = raw.get(k);
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    }
+
     if (typeof raw !== "string") return "";
     const s = raw.trim();
     if (!s) return "";
@@ -562,12 +588,12 @@
       const url = typeof input === "string" ? input : input && input.url ? input.url : "";
       const method =
         (init && init.method) || (input && input.method) || (input && input instanceof Request ? input.method : "");
-      const body = init && typeof init.body === "string" ? init.body : "";
+      const body = init && init.body != null ? init.body : "";
       const isPost = normalizeText(method) === "post";
 
       if (isPost) {
         const msgText = extractMessageText(body);
-        if (looksLikeChatSend(url, msgText)) {
+        if (looksLikeChatSend(url, msgText) && isRecentUserSendAttempt()) {
           fireStartChat({ source: "fetch", url, textLen: msgText.length });
         }
       }
@@ -601,7 +627,7 @@
 
     XMLHttpRequest.prototype.send = function send(body) {
       try {
-        if (this.__kit_metrika) this.__kit_metrika.body = typeof body === "string" ? body : "";
+        if (this.__kit_metrika) this.__kit_metrika.body = body;
       } catch {}
 
       try {
@@ -610,7 +636,7 @@
         const url = meta && meta.url;
         if (method === "post") {
           const msgText = extractMessageText(meta && meta.body);
-          if (looksLikeChatSend(url, msgText)) {
+          if (looksLikeChatSend(url, msgText) && isRecentUserSendAttempt()) {
             fireStartChat({ source: "xhr", url, textLen: msgText.length });
           }
         }
@@ -655,7 +681,7 @@
             const socketUrl = typeof url === "string" ? url : "";
             if (payload && includesAny(socketUrl, ["retail", "crm", "chat", "widget"])) {
               const msgText = extractMessageText(payload);
-              if (msgText && !includesAny(payload, ["typing", "heartbeat", "ping", "pong"])) {
+              if (msgText && isRecentUserSendAttempt() && !includesAny(payload, ["typing", "heartbeat", "ping", "pong"])) {
                 fireStartChat({ source: "ws", url: socketUrl, textLen: msgText.length });
               }
             }
@@ -708,7 +734,7 @@
         includesAny(s, ["text", "content", "body"]) &&
         !includesAny(s, ["open", "init", "ready", "history", "handshake"])
       ) {
-        fireStartChat({ source: "postMessage", origin: event.origin || "" });
+        if (isRecentUserSendAttempt()) fireStartChat({ source: "postMessage", origin: event.origin || "" });
       }
 
       if (isNightMsk() && includesAny(s, formSignals) && includesAny(s, ["success", "ok", "created", "sent"])) {
@@ -823,6 +849,7 @@
       if (!text) return false;
 
       lastSendAttempt = { ts: Date.now(), text };
+      markUserSendAttempt();
       fireStartChat({ source: "dom", via: "sendAttempt", textLen: text.length });
       return true;
     };
