@@ -18,7 +18,7 @@
     domChatDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
-    websocketDetection: true,
+    websocketDetection: false,
     dedupeTtlMs: 1000 * 60 * 60 * 24 * 14,
     startChatDedupeScope: "dialog",
     nightFormDedupeScope: "dialog",
