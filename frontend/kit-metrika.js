@@ -14,6 +14,7 @@
     nightFormWebhookUrl: "",
     webhookUseBeacon: true,
     webhookTimeoutMs: 3500,
+    attributionTtlMs: 1000 * 60 * 60 * 24 * 30,
     domChatDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
@@ -67,6 +68,7 @@
         nightFormWebhookUrl: p.get("nightWebhook") ?? p.get("nightFormWebhookUrl"),
         webhookUseBeacon: parseBoolean(p.get("webhookUseBeacon")),
         webhookTimeoutMs: parseNumber(p.get("webhookTimeoutMs")),
+        attributionTtlMs: parseNumber(p.get("attributionTtlMs")),
         startChatDedupeScope: p.get("startChatDedupeScope"),
         nightFormDedupeScope: p.get("nightFormDedupeScope"),
         dedupeTtlMs: parseNumber(p.get("dedupeTtlMs")),
@@ -117,6 +119,63 @@
     } catch {
       return String(Date.now());
     }
+  };
+
+  const getOrCreateAttribution = () => {
+    const key = "kit_metrika_attribution";
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = safeJsonParse(raw);
+        if (parsed && typeof parsed === "object" && typeof parsed.ts === "number") {
+          if (Date.now() - parsed.ts < Number(config.attributionTtlMs)) return parsed;
+        }
+      }
+    } catch {}
+    const fresh = { ts: Date.now() };
+    try {
+      localStorage.setItem(key, JSON.stringify(fresh));
+    } catch {}
+    return fresh;
+  };
+
+  const writeAttribution = (attrs) => {
+    if (!attrs || typeof attrs !== "object") return;
+    const current = getOrCreateAttribution();
+    const next = { ...current, ...attrs, ts: Date.now() };
+    try {
+      localStorage.setItem("kit_metrika_attribution", JSON.stringify(next));
+    } catch {}
+  };
+
+  const captureAttributionFromUrl = () => {
+    let params;
+    try {
+      params = new URLSearchParams(location.search || "");
+    } catch {
+      return;
+    }
+
+    const keys = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "yclid", "gclid", "fbclid"];
+    const attrs = {};
+    for (const k of keys) {
+      const v = params.get(k);
+      if (v && String(v).trim()) attrs[k] = String(v).trim();
+    }
+
+    try {
+      const yid = typeof window.ym === "function" ? window.ym(Number(config.counterId), "getClientID") : undefined;
+      if (typeof yid === "string" && yid.trim()) attrs.ya_client_id = yid.trim();
+    } catch {}
+
+    if (Object.keys(attrs).length) writeAttribution(attrs);
+  };
+
+  const getAttribution = () => {
+    const a = getOrCreateAttribution();
+    const out = { ...a };
+    delete out.ts;
+    return out;
   };
 
   const postWebhook = (url, payload) => {
@@ -404,6 +463,7 @@
       goalName: String(config.startChatGoal),
       counterId: Number(config.counterId),
       visitorId: getOrCreateVisitorId(),
+      attribution: getAttribution(),
       pageUrl: String(location.href),
       referrer: String(document.referrer || ""),
       ts: new Date().toISOString(),
@@ -430,6 +490,7 @@
       goalName: String(config.nightFormGoal),
       counterId: Number(config.counterId),
       visitorId: getOrCreateVisitorId(),
+      attribution: getAttribution(),
       pageUrl: String(location.href),
       referrer: String(document.referrer || ""),
       ts: new Date().toISOString(),
@@ -785,6 +846,7 @@
   };
 
   const init = () => {
+    captureAttributionFromUrl();
     installFetchHook();
     installXhrHook();
     installWebSocketHook();
