@@ -13,6 +13,7 @@
     domChatDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
+    websocketDetection: true,
     dedupeTtlMs: 1000 * 60 * 60 * 24 * 14,
     startChatDedupeScope: "dialog",
     nightFormDedupeScope: "dialog",
@@ -86,6 +87,31 @@
     try {
       console.log("[kit-metrika]", ...args);
     } catch {}
+  };
+
+  const pendingYmQueue = [];
+  let pendingYmTimer = null;
+
+  const scheduleYmFlush = () => {
+    if (pendingYmTimer) return;
+    pendingYmTimer = window.setInterval(() => {
+      const ymFn = typeof window.ym === "function" ? window.ym : undefined;
+      if (!ymFn) return;
+      const items = pendingYmQueue.splice(0, pendingYmQueue.length);
+      for (const item of items) {
+        try {
+          ymFn(Number(config.counterId), "reachGoal", String(item.goalName), item.params);
+          item.onSent && item.onSent();
+          log("доставлено из очереди:", item.goalName);
+        } catch (e) {
+          log("ошибка ym при доставке из очереди:", e);
+        }
+      }
+      if (pendingYmQueue.length === 0) {
+        window.clearInterval(pendingYmTimer);
+        pendingYmTimer = null;
+      }
+    }, 300);
   };
 
   const mskHour = () => {
@@ -207,15 +233,14 @@
   const reachGoal = (goalName, params) => {
     const ymFn = typeof window.ym === "function" ? window.ym : undefined;
     if (!ymFn) {
-      log("ym недоступен, цель не отправлена:", goalName);
-      return false;
+      return { status: "queued" };
     }
     try {
       ymFn(Number(config.counterId), "reachGoal", String(goalName), params);
-      return true;
+      return { status: "sent" };
     } catch (e) {
       log("ошибка ym:", e);
-      return false;
+      return { status: "error", error: e };
     }
   };
 
@@ -249,18 +274,43 @@
     return emitted;
   };
 
+  const inMemoryFired = new Set();
+
   const fireGoalOnce = (goalName, scope, meta, signalEventName) => {
     if (!goalName) return;
-    if (isGoalAlreadyFired(goalName, scope)) {
+    const dedupeKey = buildDedupeKey(goalName, scope);
+    if (inMemoryFired.has(dedupeKey) || isGoalAlreadyFired(goalName, scope)) {
       log("пропуск (дедуп):", goalName, scope);
       return;
     }
+    inMemoryFired.add(dedupeKey);
+
     const emitted = signalEventName ? emitSignal(signalEventName, goalName, meta) : false;
-    const ok = reachGoal(goalName, meta && typeof meta === "object" ? meta : undefined);
-    if (ok || emitted) {
+    const result = reachGoal(goalName, meta && typeof meta === "object" ? meta : undefined);
+
+    if (result.status === "sent") {
       markGoalFired(goalName, scope, meta);
-      log("зафиксировано:", goalName, scope, { ym: ok, signal: emitted, meta: meta ?? null });
+      log("зафиксировано:", goalName, scope, { ym: "sent", signal: emitted, meta: meta ?? null });
+      return;
     }
+
+    if (result.status === "queued") {
+      pendingYmQueue.push({
+        goalName,
+        params: meta && typeof meta === "object" ? meta : undefined,
+        onSent: () => markGoalFired(goalName, scope, meta),
+      });
+      scheduleYmFlush();
+      log("в очереди (ym еще грузится):", goalName, scope, { signal: emitted, meta: meta ?? null });
+      return;
+    }
+
+    if (emitted) {
+      log("сигнал отправлен без ym:", goalName, scope, meta ?? null);
+      return;
+    }
+
+    log("цель не отправлена:", goalName, scope, meta ?? null);
   };
 
   const fireStartChat = (meta) =>
@@ -374,6 +424,46 @@
 
       return originalSend.call(this, body);
     };
+  };
+
+  const installWebSocketHook = () => {
+    if (!config.websocketDetection) return;
+    if (typeof window.WebSocket !== "function") return;
+
+    const OriginalWebSocket = window.WebSocket;
+
+    const WrappedWebSocket = function WebSocket(url, protocols) {
+      const ws =
+        protocols !== undefined ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
+      try {
+        const originalSend = ws.send.bind(ws);
+        ws.send = (data) => {
+          try {
+            const payload = typeof data === "string" ? data : "";
+            const socketUrl = typeof url === "string" ? url : "";
+            if (payload && includesAny(socketUrl, ["retail", "crm", "chat", "widget"])) {
+              if (includesAny(payload, ["message", "text", "content", "body"]) && !includesAny(payload, ["typing"])) {
+                fireStartChat({ source: "ws", url: socketUrl });
+              }
+            }
+          } catch {}
+          return originalSend(data);
+        };
+      } catch {}
+      return ws;
+    };
+
+    try {
+      WrappedWebSocket.prototype = OriginalWebSocket.prototype;
+      Object.defineProperty(WrappedWebSocket, "CONNECTING", { value: OriginalWebSocket.CONNECTING });
+      Object.defineProperty(WrappedWebSocket, "OPEN", { value: OriginalWebSocket.OPEN });
+      Object.defineProperty(WrappedWebSocket, "CLOSING", { value: OriginalWebSocket.CLOSING });
+      Object.defineProperty(WrappedWebSocket, "CLOSED", { value: OriginalWebSocket.CLOSED });
+    } catch {}
+
+    try {
+      window.WebSocket = WrappedWebSocket;
+    } catch {}
   };
 
   const installPostMessageHook = () => {
@@ -582,6 +672,7 @@
   const init = () => {
     installFetchHook();
     installXhrHook();
+    installWebSocketHook();
     installPostMessageHook();
     installDomTextObserver();
     installDomChatStartDetector();
