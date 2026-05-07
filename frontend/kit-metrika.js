@@ -344,8 +344,11 @@
 
   const getScopeKey = (scope) => {
     if (scope === "page") return `page:${location.href}`;
-    if (scope === "browser") return "browser";
-    return `dialog:${tryGetRetailDialogIdFromStorage()}`;
+    if (scope === "browser") return `visitor:${getOrCreateVisitorId()}`;
+    if (scope === "visitor") return `visitor:${getOrCreateVisitorId()}`;
+    const dialogId = tryGetRetailDialogIdFromStorage();
+    if (typeof dialogId === "string" && dialogId.startsWith("ls:")) return `dialog:${dialogId}`;
+    return `visitor:${getOrCreateVisitorId()}`;
   };
 
   const buildDedupeKey = (goalName, scope) =>
