@@ -503,12 +503,39 @@
     if (config.debug) log("webhook night_form:", r.status);
   };
 
-  const looksLikeChatSend = (url, bodyText) => {
+  const extractMessageText = (raw) => {
+    if (typeof raw !== "string") return "";
+    const s = raw.trim();
+    if (!s) return "";
+
+    const json = safeJsonParse(s);
+    if (json && typeof json === "object") {
+      const candidates = ["text", "message", "content", "body"];
+      for (const k of candidates) {
+        const v = json[k];
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    }
+
+    try {
+      const params = new URLSearchParams(s);
+      const candidates = ["text", "message", "content", "body"];
+      for (const k of candidates) {
+        const v = params.get(k);
+        if (v && String(v).trim()) return String(v).trim();
+      }
+    } catch {}
+
+    return "";
+  };
+
+  const looksLikeChatSend = (url, messageText) => {
     const u = normalizeText(url);
-    const b = normalizeText(bodyText);
+    const t = normalizeText(messageText);
+    if (!t) return false;
     const urlSignals = ["chat", "message", "retail", "crm", "widget"];
-    const bodySignals = ["message", "text", "content", "body", "client"];
-    return includesAny(u, urlSignals) && includesAny(b, bodySignals);
+    return includesAny(u, urlSignals);
   };
 
   const looksLikeNightFormSuccess = (url, bodyText, responseText) => {
@@ -538,8 +565,11 @@
       const body = init && typeof init.body === "string" ? init.body : "";
       const isPost = normalizeText(method) === "post";
 
-      if (isPost && looksLikeChatSend(url, body)) {
-        fireStartChat({ source: "fetch", url });
+      if (isPost) {
+        const msgText = extractMessageText(body);
+        if (looksLikeChatSend(url, msgText)) {
+          fireStartChat({ source: "fetch", url, textLen: msgText.length });
+        }
       }
 
       return original(input, init).then(async (res) => {
@@ -578,8 +608,11 @@
         const meta = this.__kit_metrika;
         const method = normalizeText(meta && meta.method);
         const url = meta && meta.url;
-        if (method === "post" && looksLikeChatSend(url, meta && meta.body)) {
-          fireStartChat({ source: "xhr", url });
+        if (method === "post") {
+          const msgText = extractMessageText(meta && meta.body);
+          if (looksLikeChatSend(url, msgText)) {
+            fireStartChat({ source: "xhr", url, textLen: msgText.length });
+          }
         }
       } catch {}
 
@@ -621,8 +654,9 @@
             const payload = typeof data === "string" ? data : "";
             const socketUrl = typeof url === "string" ? url : "";
             if (payload && includesAny(socketUrl, ["retail", "crm", "chat", "widget"])) {
-              if (includesAny(payload, ["message", "text", "content", "body"]) && !includesAny(payload, ["typing"])) {
-                fireStartChat({ source: "ws", url: socketUrl });
+              const msgText = extractMessageText(payload);
+              if (msgText && !includesAny(payload, ["typing", "heartbeat", "ping", "pong"])) {
+                fireStartChat({ source: "ws", url: socketUrl, textLen: msgText.length });
               }
             }
           } catch {}
@@ -668,7 +702,12 @@
       const chatSignals = ["chat", "message", "send", "sent", "retail", "crm"];
       const formSignals = ["form", "lead", "request", "callback", "submit", "success", "ok", "created"];
 
-      if (includesAny(s, chatSignals) && includesAny(s, ["send", "sent", "message"])) {
+      if (
+        includesAny(s, chatSignals) &&
+        includesAny(s, ["send", "sent"]) &&
+        includesAny(s, ["text", "content", "body"]) &&
+        !includesAny(s, ["open", "init", "ready", "history", "handshake"])
+      ) {
         fireStartChat({ source: "postMessage", origin: event.origin || "" });
       }
 
