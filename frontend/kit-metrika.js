@@ -23,6 +23,7 @@
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
     domChatRootTextMaxLen: 800,
     websocketDetection: false,
+    eventSourceDetection: true,
     dedupeTtlMs: 1000 * 60 * 60 * 24 * 14,
     startChatDedupeScope: "dialog",
     nightFormDedupeScope: "dialog",
@@ -76,6 +77,7 @@
         allowNetworkStartWithoutUserGesture: parseBoolean(p.get("allowNetworkStartWithoutUserGesture")),
         userGestureWindowMs: parseNumber(p.get("userGestureWindowMs")),
         domChatRootTextMaxLen: parseNumber(p.get("domChatRootTextMaxLen")),
+        eventSourceDetection: parseBoolean(p.get("eventSourceDetection")),
         startChatDedupeScope: p.get("startChatDedupeScope"),
         nightFormDedupeScope: p.get("nightFormDedupeScope"),
         dedupeTtlMs: parseNumber(p.get("dedupeTtlMs")),
@@ -584,6 +586,59 @@
     return false;
   };
 
+  const parseEventSourcePayload = (data) => {
+    if (typeof data !== "string") return undefined;
+    const s = data.trim();
+    if (!s) return undefined;
+    const json = safeJsonParse(s);
+    if (json && typeof json === "object") return json;
+    return undefined;
+  };
+
+  const extractChatMessageFromPayload = (payload) => {
+    if (!payload || typeof payload !== "object") return undefined;
+    const t = payload.type && typeof payload.type === "string" ? payload.type : "";
+    const msg = payload.data && typeof payload.data === "object" ? payload.data : payload;
+    const content =
+      (typeof msg.content === "string" && msg.content) ||
+      (typeof msg.text === "string" && msg.text) ||
+      (typeof msg.message === "string" && msg.message) ||
+      "";
+    const fromMe =
+      typeof msg.from_me === "boolean"
+        ? msg.from_me
+        : typeof msg.fromMe === "boolean"
+          ? msg.fromMe
+          : typeof msg.from_me === "number"
+            ? Boolean(msg.from_me)
+            : typeof msg.fromMe === "number"
+              ? Boolean(msg.fromMe)
+              : false;
+    const status = typeof msg.status === "string" ? msg.status : "";
+    const id =
+      (typeof msg.id === "string" && msg.id) ||
+      (typeof msg.id === "number" && String(msg.id)) ||
+      (typeof msg.message_id === "string" && msg.message_id) ||
+      (typeof msg.messageId === "string" && msg.messageId) ||
+      "";
+    const time =
+      (typeof msg.time === "string" && msg.time) ||
+      (typeof msg.created_at === "string" && msg.created_at) ||
+      (typeof msg.updated_at === "string" && msg.updated_at) ||
+      (typeof msg.createdAt === "string" && msg.createdAt) ||
+      (typeof msg.updatedAt === "string" && msg.updatedAt) ||
+      "";
+    return { type: t, content: String(content || ""), fromMe, status: String(status || ""), id: String(id || ""), time };
+  };
+
+  const isFreshTimestamp = (timeStr) => {
+    if (!timeStr) return false;
+    const ts = Date.parse(String(timeStr));
+    if (!Number.isFinite(ts)) return false;
+    const diff = Date.now() - ts;
+    return diff >= 0 && diff <= 20000;
+  };
+
   const installFetchHook = () => {
     if (typeof window.fetch !== "function") return;
     const original = window.fetch.bind(window);
@@ -705,6 +760,43 @@
 
     try {
       window.WebSocket = WrappedWebSocket;
+    } catch {}
+  };
+
+  const installEventSourceHook = () => {
+    if (!config.eventSourceDetection) return;
+    if (typeof window.EventSource !== "function") return;
+
+    const OriginalEventSource = window.EventSource;
+
+    const WrappedEventSource = function EventSource(url, configArg) {
+      const es = configArg !== undefined ? new OriginalEventSource(url, configArg) : new OriginalEventSource(url);
+      try {
+        const esUrl = typeof url === "string" ? url : "";
+        const u = normalizeText(esUrl);
+        if (!includesAny(u, ["retailcrm", "retail", "crm", "chat", "widget", "rc.retailcrm"])) return es;
+
+        es.addEventListener("message", (e) => {
+          try {
+            const payload = parseEventSourcePayload(e && e.data ? String(e.data) : "");
+            const msg = extractChatMessageFromPayload(payload);
+            if (!msg) return;
+            if (!msg.fromMe) return;
+            if (!normalizeText(msg.content)) return;
+            if (!isRecentUserSendAttempt() && !isFreshTimestamp(msg.time)) return;
+            fireStartChat({ source: "eventSource", url: esUrl, status: msg.status, id: msg.id, time: msg.time });
+          } catch {}
+        });
+      } catch {}
+      return es;
+    };
+
+    try {
+      WrappedEventSource.prototype = OriginalEventSource.prototype;
+    } catch {}
+
+    try {
+      window.EventSource = WrappedEventSource;
     } catch {}
   };
 
@@ -946,6 +1038,7 @@
     installFetchHook();
     installXhrHook();
     installWebSocketHook();
+    installEventSourceHook();
     installPostMessageHook();
     installDomTextObserver();
     installDomChatStartDetector();
