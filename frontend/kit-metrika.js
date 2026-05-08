@@ -21,6 +21,7 @@
     domNightFormSubmitDetection: true,
     domChatRootTextPatterns: ["ваш консультант", "online"],
     domChatRootAttrPatterns: ["retail", "crm", "chat", "widget", "consult"],
+    domChatRootTextMaxLen: 800,
     websocketDetection: false,
     dedupeTtlMs: 1000 * 60 * 60 * 24 * 14,
     startChatDedupeScope: "dialog",
@@ -74,6 +75,7 @@
         attributionTtlMs: parseNumber(p.get("attributionTtlMs")),
         allowNetworkStartWithoutUserGesture: parseBoolean(p.get("allowNetworkStartWithoutUserGesture")),
         userGestureWindowMs: parseNumber(p.get("userGestureWindowMs")),
+        domChatRootTextMaxLen: parseNumber(p.get("domChatRootTextMaxLen")),
         startChatDedupeScope: p.get("startChatDedupeScope"),
         nightFormDedupeScope: p.get("nightFormDedupeScope"),
         dedupeTtlMs: parseNumber(p.get("dedupeTtlMs")),
@@ -822,12 +824,19 @@
     let el = startEl && startEl.nodeType === Node.ELEMENT_NODE ? startEl : startEl && startEl.parentElement;
     const attrPatterns = config.domChatRootAttrPatterns ?? DEFAULTS.domChatRootAttrPatterns;
     const textPatterns = config.domChatRootTextPatterns ?? DEFAULTS.domChatRootTextPatterns;
+    const maxTextLenRaw = Number(config.domChatRootTextMaxLen);
+    const maxTextLen =
+      Number.isFinite(maxTextLenRaw) && maxTextLenRaw > 0 ? maxTextLenRaw : DEFAULTS.domChatRootTextMaxLen;
 
     for (let i = 0; i < maxUp && el; i += 1) {
       if (elementMatchesPatterns(el, attrPatterns)) return el;
       try {
+        if (el === document.body || el === document.documentElement) {
+          el = el.parentElement;
+          continue;
+        }
         const t = normalizeText(el.textContent || "");
-        if (t && includesAny(t, textPatterns)) return el;
+        if (t && t.length <= maxTextLen && includesAny(t, textPatterns)) return el;
       } catch {}
       el = el.parentElement;
     }
