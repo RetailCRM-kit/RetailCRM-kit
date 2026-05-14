@@ -12,6 +12,7 @@
     nightFormEventName: "kit_night_form_chat_retail",
     startChatWebhookUrl: "",
     nightFormWebhookUrl: "",
+    autoNotify: true,
     webhookUseBeacon: true,
     webhookTimeoutMs: 3500,
     attributionTtlMs: 1000 * 60 * 60 * 24 * 30,
@@ -71,6 +72,7 @@
         debug: parseBoolean(p.get("debug")),
         startChatWebhookUrl: p.get("startWebhook") ?? p.get("startChatWebhookUrl"),
         nightFormWebhookUrl: p.get("nightWebhook") ?? p.get("nightFormWebhookUrl"),
+        autoNotify: parseBoolean(p.get("autoNotify")),
         webhookUseBeacon: parseBoolean(p.get("webhookUseBeacon")),
         webhookTimeoutMs: parseNumber(p.get("webhookTimeoutMs")),
         attributionTtlMs: parseNumber(p.get("attributionTtlMs")),
@@ -492,6 +494,7 @@
       pageUrl: String(location.href),
       referrer: String(document.referrer || ""),
       ts: new Date().toISOString(),
+      autoNotify: Boolean(config.autoNotify),
       meta: meta && typeof meta === "object" ? meta : undefined,
     };
     const r = postWebhook(config.startChatWebhookUrl, payload);
@@ -519,6 +522,7 @@
       pageUrl: String(location.href),
       referrer: String(document.referrer || ""),
       ts: new Date().toISOString(),
+      autoNotify: Boolean(config.autoNotify),
       meta: meta && typeof meta === "object" ? meta : undefined,
     };
     const r = postWebhook(config.nightFormWebhookUrl, payload);
